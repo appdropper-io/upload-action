@@ -1,0 +1,162 @@
+name: "Upload to App Dropper"
+description: "Send an .apk or .ipa to App Dropper and get a shareable install link — optionally posted straight to the pull request."
+author: "App Dropper"
+
+branding:
+  icon: "upload-cloud"
+  color: "purple"
+
+inputs:
+  file:
+    description: "Path to the .apk or .ipa to upload, relative to the workspace."
+    required: true
+  token:
+    description: "An App Dropper API token. Store it as a repository secret and pass ${{ secrets.APPDROPPER_TOKEN }}."
+    required: true
+  release-notes:
+    description: "Release notes shown to testers on the install page. Defaults to the head commit message."
+    required: false
+    default: ""
+  tag:
+    description: 'Label for the build, e.g. "beta" or "nightly".'
+    required: false
+    default: ""
+  comment-on-pr:
+    description: "Post the install link and QR code as a pull-request comment. Ignored outside pull_request events."
+    required: false
+    default: "true"
+  timeout:
+    description: "Seconds to wait for the build to finish processing."
+    required: false
+    default: "600"
+  cli-version:
+    description: "Version of the appdropper npm package to run."
+    required: false
+    default: "1"
+  api-url:
+    description: "Override the API base URL. Only needed for a self-hosted deployment."
+    required: false
+    default: ""
+
+outputs:
+  install-url:
+    description: "Public install link for the uploaded build."
+    value: ${{ steps.upload.outputs.install-url }}
+  build-id:
+    description: "Identifier of the build that was created."
+    value: ${{ steps.upload.outputs.build-id }}
+  qr-url:
+    description: "PNG QR code pointing at the install link."
+    value: ${{ steps.upload.outputs.qr-url }}
+
+runs:
+  # A composite action rather than a bundled JavaScript one: the whole thing is
+  # a thin wrapper over the CLI, and shipping it this way means the Action and a
+  # hand-written `run: npx appdropper upload` step are the same code path — one
+  # place for bugs to be fixed, one place for behaviour to drift.
+  using: "composite"
+  steps:
+    - name: Upload build
+      id: upload
+      shell: bash
+      env:
+        APPDROPPER_TOKEN: ${{ inputs.token }}
+        APPDROPPER_API_URL: ${{ inputs.api-url }}
+        INPUT_FILE: ${{ inputs.file }}
+        INPUT_NOTES: ${{ inputs.release-notes }}
+        INPUT_TAG: ${{ inputs.tag }}
+        INPUT_TIMEOUT: ${{ inputs.timeout }}
+        CLI_VERSION: ${{ inputs.cli-version }}
+        HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${APPDROPPER_TOKEN}" ]; then
+          echo '::error::No token supplied. Set the step input "token" to your APPDROPPER_TOKEN repository secret.'
+          exit 1
+        fi
+        if [ ! -f "${INPUT_FILE}" ]; then
+          echo "::error::No such file: ${INPUT_FILE}"
+          exit 1
+        fi
+
+        # An empty api-url input must not shadow the CLI's own default.
+        if [ -z "${APPDROPPER_API_URL}" ]; then unset APPDROPPER_API_URL; fi
+
+        # Default the notes to the commit that triggered the run — the single
+        # most useful thing to show a tester, and free to collect here.
+        NOTES="${INPUT_NOTES}"
+        if [ -z "${NOTES}" ]; then NOTES="${HEAD_COMMIT_MESSAGE:-}"; fi
+
+        ARGS=(upload "${INPUT_FILE}" --timeout "${INPUT_TIMEOUT}" --no-qr)
+        if [ -n "${NOTES}" ]; then ARGS+=(--notes "${NOTES}"); fi
+        if [ -n "${INPUT_TAG}" ]; then ARGS+=(--tag "${INPUT_TAG}"); fi
+
+        # The CLI writes install-url, build-id and qr-url to $GITHUB_OUTPUT
+        # itself, so there is nothing to parse out of its stdout here.
+        npx --yes "appdropper@${CLI_VERSION}" "${ARGS[@]}"
+
+    - name: Job summary
+      if: success()
+      shell: bash
+      env:
+        INSTALL_URL: ${{ steps.upload.outputs.install-url }}
+        QR_URL: ${{ steps.upload.outputs.qr-url }}
+      run: |
+        {
+          echo "### 📲 Build ready to install"
+          echo
+          echo "[**Open the install page**](${INSTALL_URL})"
+          echo
+          echo "<img src=\"${QR_URL}&size=180\" width=\"180\" alt=\"Install QR code\">"
+          echo
+          echo "Scan it with the phone you want to install on."
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Comment on the pull request
+      # Only on pull requests, and only when the workflow has been given
+      # permission to write to issues — a forked-PR run has a read-only token
+      # and this step would otherwise fail an otherwise-successful upload.
+      if: >-
+        success() &&
+        inputs.comment-on-pr == 'true' &&
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        INSTALL_URL: ${{ steps.upload.outputs.install-url }}
+        QR_URL: ${{ steps.upload.outputs.qr-url }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        FILE: ${{ inputs.file }}
+      run: |
+        set -euo pipefail
+
+        BODY=$(cat <<EOF
+        <!-- appdropper-install-link -->
+        ### 📲 Test build ready
+
+        | | |
+        |---|---|
+        | **Install** | [${INSTALL_URL}](${INSTALL_URL}) |
+        | **Artifact** | \`$(basename "${FILE}")\` |
+        | **Commit** | \`${GITHUB_SHA:0:7}\` |
+
+        <img src="${QR_URL}&size=200" width="200" alt="Install QR code">
+
+        Open the link on the device you want to install on, or scan the code.
+        EOF
+        )
+
+        # One comment per pull request, edited in place: a long-running PR
+        # shouldn't accumulate a comment per push, and the marker above is how
+        # the existing one is found again.
+        EXISTING=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+          --jq 'map(select(.body | contains("<!-- appdropper-install-link -->"))) | .[0].id // empty' || true)
+
+        if [ -n "${EXISTING}" ]; then
+          gh api --method PATCH "repos/${REPO}/issues/comments/${EXISTING}" -f body="${BODY}" >/dev/null
+        else
+          gh api --method POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${BODY}" >/dev/null
+        fi
