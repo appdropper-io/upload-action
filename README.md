@@ -83,6 +83,17 @@ Two requirements:
 
 Set `comment-on-pr: false` to turn comments off. The job summary — same link, same QR code, on the workflow run page — is always written and needs no permissions.
 
+## What your testers are told
+
+A successful upload emails and push-notifies everyone on the app — managers and
+testers alike — with *"A new version is available for {your app}"*, including
+the account that owns the token, since nobody watched the workflow run. The
+email carries the version, your release notes, and the repository, branch and
+commit the build came from, with a link straight back to the workflow run.
+
+Set `APPDROPPER_NO_CI_INFO: "1"` in the step's `env` to leave the repository
+and branch details out; the email still goes out, it just doesn't name them.
+
 ## Only upload when it matters
 
 Uploads count against your plan's hourly limit and storage, so most teams gate them:
