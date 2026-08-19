@@ -11,7 +11,11 @@ inputs:
     description: "Path to the .apk or .ipa to upload, relative to the workspace."
     required: true
   token:
-    description: "An App Dropper API token. Store it as a repository secret and pass ${{ secrets.APPDROPPER_TOKEN }}."
+    # No ${{ }} in this description: GitHub evaluates expressions anywhere in a
+    # manifest, including input descriptions, and "secrets" is not a valid context
+    # at load time — an example here fails the whole action with
+    # "Unrecognized named-value: 'secrets'" before any step runs.
+    description: "An App Dropper API token. Store it as a repository secret and pass secrets.APPDROPPER_TOKEN."
     required: true
   release-notes:
     description: "Release notes shown to testers on the install page. Defaults to the head commit message."
