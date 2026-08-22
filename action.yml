@@ -72,33 +72,7 @@ runs:
         INPUT_TIMEOUT: ${{ inputs.timeout }}
         CLI_VERSION: ${{ inputs.cli-version }}
         HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
-      run: |
-        set -euo pipefail
-
-        if [ -z "${APPDROPPER_TOKEN}" ]; then
-          echo '::error::No token supplied. Set the step input "token" to your APPDROPPER_TOKEN repository secret.'
-          exit 1
-        fi
-        if [ ! -f "${INPUT_FILE}" ]; then
-          echo "::error::No such file: ${INPUT_FILE}"
-          exit 1
-        fi
-
-        # An empty api-url input must not shadow the CLI's own default.
-        if [ -z "${APPDROPPER_API_URL}" ]; then unset APPDROPPER_API_URL; fi
-
-        # Default the notes to the commit that triggered the run — the single
-        # most useful thing to show a tester, and free to collect here.
-        NOTES="${INPUT_NOTES}"
-        if [ -z "${NOTES}" ]; then NOTES="${HEAD_COMMIT_MESSAGE:-}"; fi
-
-        ARGS=(upload "${INPUT_FILE}" --timeout "${INPUT_TIMEOUT}" --no-qr)
-        if [ -n "${NOTES}" ]; then ARGS+=(--notes "${NOTES}"); fi
-        if [ -n "${INPUT_TAG}" ]; then ARGS+=(--tag "${INPUT_TAG}"); fi
-
-        # The CLI writes install-url, build-id and qr-url to $GITHUB_OUTPUT
-        # itself, so there is nothing to parse out of its stdout here.
-        npx --yes "appdropper@${CLI_VERSION}" "${ARGS[@]}"
+      run: ${{ github.action_path }}/scripts/upload.sh
 
     - name: Job summary
       if: success()
@@ -106,16 +80,7 @@ runs:
       env:
         INSTALL_URL: ${{ steps.upload.outputs.install-url }}
         QR_URL: ${{ steps.upload.outputs.qr-url }}
-      run: |
-        {
-          echo "### 📲 Build ready to install"
-          echo
-          echo "[**Open the install page**](${INSTALL_URL})"
-          echo
-          echo "<img src=\"${QR_URL}&size=180\" width=\"180\" alt=\"Install QR code\">"
-          echo
-          echo "Scan it with the phone you want to install on."
-        } >> "$GITHUB_STEP_SUMMARY"
+      run: ${{ github.action_path }}/scripts/summary.sh
 
     - name: Comment on the pull request
       # Only on pull requests, and only when the workflow has been given
@@ -134,33 +99,4 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
         FILE: ${{ inputs.file }}
-      run: |
-        set -euo pipefail
-
-        BODY=$(cat <<EOF
-        <!-- appdropper-install-link -->
-        ### 📲 Test build ready
-
-        | | |
-        |---|---|
-        | **Install** | [${INSTALL_URL}](${INSTALL_URL}) |
-        | **Artifact** | \`$(basename "${FILE}")\` |
-        | **Commit** | \`${GITHUB_SHA:0:7}\` |
-
-        <img src="${QR_URL}&size=200" width="200" alt="Install QR code">
-
-        Open the link on the device you want to install on, or scan the code.
-        EOF
-        )
-
-        # One comment per pull request, edited in place: a long-running PR
-        # shouldn't accumulate a comment per push, and the marker above is how
-        # the existing one is found again.
-        EXISTING=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
-          --jq 'map(select(.body | contains("<!-- appdropper-install-link -->"))) | .[0].id // empty' || true)
-
-        if [ -n "${EXISTING}" ]; then
-          gh api --method PATCH "repos/${REPO}/issues/comments/${EXISTING}" -f body="${BODY}" >/dev/null
-        else
-          gh api --method POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${BODY}" >/dev/null
-        fi
+      run: ${{ github.action_path }}/scripts/comment.sh
